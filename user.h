@@ -23,7 +23,19 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int clone(void (*fcn)(void *, void *), void *arg1, void *arg2, void *stack);
+int join(void **stack);
+int thread_create(void (*start_routine)(void *, void *), void *arg1, void *arg2);
+int thread_join(void);
 
+// 新增：自旋锁
+typedef struct lock_t {
+  uint flag;
+} lock_t;
+
+void lock_init(lock_t *lock);
+void lock_acquire(lock_t *lock);
+void lock_release(lock_t *lock);
 // ulib.c
 int stat(const char*, struct stat*);
 char* strcpy(char*, const char*);

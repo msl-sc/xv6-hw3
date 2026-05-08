@@ -89,6 +89,9 @@ found:
   p->state = EMBRYO;
   p->pid = nextpid++;
 
+  p->pgdir_ref = 0;
+  p->ustack = 0;
+
   release(&ptable.lock);
 
   // Allocate kernel stack.
@@ -196,6 +199,7 @@ fork(void)
     np->state = UNUSED;
     return -1;
   }
+  np->pgdir_ref = 0; // no sharing for forked processes
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
@@ -209,7 +213,7 @@ fork(void)
   np->cwd = idup(curproc->cwd);
 
   safestrcpy(np->name, curproc->name, sizeof(curproc->name));
-
+  np->ustack = 0; // not a thread, no user stack to save
   pid = np->pid;
 
   acquire(&ptable.lock);
@@ -282,6 +286,8 @@ wait(void)
     havekids = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->parent != curproc)
+        continue;
+      if(p->pgdir == curproc->pgdir) //jump over threads
         continue;
       havekids = 1;
       if(p->state == ZOMBIE){
@@ -530,5 +536,126 @@ procdump(void)
         cprintf(" %p", pc[i]);
     }
     cprintf("\n");
+  }
+}
+
+int
+clone(void(*fcn)(void*, void*), void *arg1, void *arg2, void *stack_top)
+{
+  struct proc *np;
+  struct proc *curproc = myproc();
+
+  // 1. 分配线程控制块 (allocproc 已经分配了 pid)
+  if((np = allocproc()) == 0){
+    return -1;
+  }
+
+  // 2. 共享父进程地址空间
+  np->pgdir = curproc->pgdir;
+  if(curproc->pgdir_ref == 0) {
+    curproc->pgdir_ref = (int*)kalloc();
+    if(curproc->pgdir_ref == 0) {
+      kfree(np->kstack);
+      np->kstack = 0;
+      np->state = UNUSED;
+      return -1;
+    }
+    *curproc->pgdir_ref = 1;
+  }
+  np->pgdir_ref = curproc->pgdir_ref;
+  (*np->pgdir_ref)++;
+
+  // 3. 共享资源
+  np->sz = curproc->sz;
+  np->ustack = stack_top; // 保存栈顶，用于 join 释放
+  for(int i = 0; i < NOFILE; i++){
+    if(curproc->ofile[i])
+      np->ofile[i] = filedup(curproc->ofile[i]);
+  }
+  np->cwd = idup(curproc->cwd);
+  safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+
+  // 4. 配置线程上下文 (关键修正：栈布局)
+  *np->tf = *curproc->tf;
+
+  // stack_top 是栈的最高地址，我们从这里向下构建栈帧
+  uint *sp = (uint*)stack_top;
+  
+  // 修正：x86 栈向下增长，参数从右往左压
+  sp--; *sp = (uint)arg2;       // 最后一个参数
+  sp--; *sp = (uint)arg1;       // 第一个参数
+  sp--; *sp = 0xffffffff;       // 返回地址 (假地址，用于触发 exit)
+
+  np->tf->esp = (uint)sp;       // 栈指针指向返回地址
+  np->tf->eip = (uint)fcn;      // 指令指针指向线程函数
+  np->tf->eax = 0;               // 返回值设为 0
+
+  // 5. 启动线程
+  np->parent = curproc;
+  np->state = RUNNABLE;
+
+  return np->pid;
+}
+
+int
+join(void **stack)
+{
+  struct proc *curproc = myproc();
+  struct proc *p;
+  int havekids, pid;
+
+  acquire(&ptable.lock);
+  for(;;){
+    havekids = 0;
+    // 扫描进程表，仅处理同地址空间的子线程
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->parent != curproc) continue;
+      if(p->pgdir != curproc->pgdir) continue; // 跳过fork的子进程
+      
+      havekids = 1;
+      // 处理已退出的僵尸线程
+      if(p->state == ZOMBIE){
+        pid = p->pid;
+        // 输出线程栈地址给用户态
+        if(stack != 0) *stack = p->ustack;
+
+        // 释放线程资源
+        kfree(p->kstack);
+        p->kstack = 0;
+        (*p->pgdir_ref)--; // 仅减少引用计数，不释放共享页表
+        p->pgdir = 0;
+        p->pgdir_ref = 0;
+
+        // 关闭文件、释放目录
+        for(int i = 0; i < NOFILE; i++){
+          if(p->ofile[i]){
+            fileclose(p->ofile[i]);
+            p->ofile[i] = 0;
+          }
+        }
+        iput(p->cwd);
+        p->cwd = 0;
+
+        // 重置进程控制块
+        p->state = UNUSED;
+        p->pid = 0;
+        p->parent = 0;
+        p->name[0] = 0;
+        p->killed = 0;
+        p->chan = 0;
+
+        release(&ptable.lock);
+        return pid;
+      }
+    }
+
+    // 无待等待的子线程，返回失败
+    if(!havekids || curproc->killed){
+      release(&ptable.lock);
+      return -1;
+    }
+
+    // 睡眠等待子线程退出
+    sleep(curproc, &ptable.lock);
   }
 }

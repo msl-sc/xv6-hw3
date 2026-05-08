@@ -89,3 +89,29 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+
+int sys_clone(void) {
+  void (*fcn)(void *, void *);
+  void *arg1, *arg2, *stack;
+
+  // 从用户栈获取参数
+  if(argint(0, (int*)&fcn) < 0 || 
+     argint(1, (int*)&arg1) < 0 || 
+     argint(2, (int*)&arg2) < 0 || 
+     argint(3, (int*)&stack) < 0)
+    return -1;
+
+  // 校验栈必须页对齐
+  if((uint)stack % PGSIZE != 0)
+    return -1;
+
+  return clone(fcn, arg1, arg2, stack);
+}
+
+int sys_join(void) {
+  void **stack;
+  if(argint(0, (int*)&stack) < 0)
+    return -1;
+  return join(stack);
+}
