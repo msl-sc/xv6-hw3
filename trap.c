@@ -77,24 +77,7 @@ trap(struct trapframe *tf)
             cpuid(), tf->cs, tf->eip);
     lapiceoi();
     break;
-  case T_PGFLT:
-    if(myproc() == 0 || (tf->cs&3) == 0){
-      // In kernel, it must be our mistake.
-      cprintf("unexpected trap: page fault from cpu %d eip %x (cr2=0x%x)\n",
-              cpuid(), tf->eip, rcr2());
-      panic("page fault");
-    }
-    
-    // 新增：仅在用户态处理线程函数返回的假地址
-    if(tf->eip == 0xffffffff){
-      exit();
-    }
 
-    // In user space, assume process misbehaved.
-    cprintf("pid %d %s: page fault at eip %x addr %x--kill proc\n",
-            myproc()->pid, myproc()->name, tf->eip, rcr2());
-    myproc()->killed = 1;
-    break;
   //PAGEBREAK: 13
   default:
     if(myproc() == 0 || (tf->cs&3) == 0){
